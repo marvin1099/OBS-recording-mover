@@ -39,11 +39,11 @@ Running them will make the venv for you and run `OBS-recording-mover.py` with th
 python OBS-recording-mover.py [options]
 ```
 
-Once run for the first time, all provided or default arguments are saved to a config file in your OS-native config directory.
-e.g. `~/.config/OBS-recording-mover/mover_config.json` on Linux.
+Once run for the first time, all provided or default arguments are saved to a config file in your OS-native config directory.  
+e.g. `~/.config/OBS-recording-mover/mover_config.json` on Linux.  
 These values are reused next time unless overridden on the command line.
 
-Keep the script running while recording (or all the time).
+Keep the script running while recording (or all the time).  
 After the recording is finished, the output file will be moved to:
 
 ```
@@ -74,14 +74,14 @@ python OBS-recording-mover.py -p REALOBSPASS \
   -c 'kdotool getwindowname $(kdotool getactivewindow)'
 ```
 
-Its to note that the **sanitized titles** are expected as shorthand keys.
-You can get the sanitized titles by making a short test recording,
-while the script is running, with the window in focus that you want to get.
+Its to note that the **sanitized titles** are expected as shorthand keys.  
+You can get the sanitized titles by making a short test recording,  
+while the script is running, with the window in focus that you want to get.  
 The CLI output will show the sanitized titles.
 
 ## Configuration
 
-The configuration is saved after first run and auto-loaded in future runs.
+The configuration is saved after first run and auto-loaded in future runs.  
 You can also manually edit the config file if needed:
 
 * **Linux:** `~/.config/obs_auto_move/config.json`
