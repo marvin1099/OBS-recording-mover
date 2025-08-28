@@ -13,11 +13,10 @@ import platform
 import obsws_python as obs
 import pywinctl
 
-# === CONFIG ===
-# {"/mnt/AufnahmeSpeicher": "/home/smb/AufnahmeSpeicher/"}
-# {"OBS-move-rec-python3-Konsole": "OBSmovRec-Konsole"}
-# ===============
-
+# === Example for -T and -S ===
+# -T '{"/mnt/AufnahmeSpeicher": "/home/smb/AufnahmeSpeicher/"}'
+# -S '{"OBS-move-rec-python3-Konsole": "OBSmovRec-Konsole"}'
+# =============================
 
 def get_config_dir(app_name):
     config_dir = None
