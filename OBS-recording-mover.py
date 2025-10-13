@@ -65,9 +65,9 @@ def setup_arg_parser(config_defaults):
     parser.add_argument("-d", "--dest_base", default=config_defaults.get("dest_base", ".."), help="Where to relocate the Videos from (default \"..\")")
     parser.add_argument("-t", "--track_interval", type=int, default=config_defaults.get("track_interval", 1), help="Window tracking intervall (default 1)")
     parser.add_argument("-c", "--track_command", default=config_defaults.get("track_command", ""), help="Set a window tracking command, so wayland users can still use window tracking")
-    parser.add_argument("-s", "--strip", default=config_defaults.get("strip", "-—"), help="Characters to strip from window titles with previus chars (def: -—)")
     parser.add_argument("-T", "--translate", type=str, default=config_defaults.get("translate", {}), help="Path translation JSON string")
     parser.add_argument("-S", "--shorthand", type=str, default=config_defaults.get("shorthand", {}), help="Shorthand mapping JSON string")
+    parser.add_argument("-C", "--check_track", action='store_true', help="Only Check what window would be tracked and the sanitized title")
 
     args = parser.parse_args()
     return args
@@ -87,11 +87,52 @@ def get_focused_window_title():
     win = pywinctl.getActiveWindow()
     return win.title if win else "Desktop"
 
+def extract_relevant_title(title: str) -> str:
+    # Normalize separators
+    title = title.replace("—", "-").strip()
+
+    # Split by dash and clean parts
+    parts = [p.strip() for p in title.split("-") if p.strip()]
+
+    # If nothing to process, return as-is
+    if parts:
+        # Words to ignore
+        irrelevant_keywords = ["vulkan", "direct3d", "opengl", "metal", "dx12", "dx11", "dx9"]
+
+        # Pop last entriey if irrelevant (case-insensitive)
+        last = parts[-1].lower().replace(" ","")
+        for kw in irrelevant_keywords:
+            if kw in last and len(last) < len(kw)+6:
+                parts.pop()
+
+    if parts:
+        # Take the last list item (usually main title)
+        chosen = parts[-1].strip()
+
+        # If it's a path, use the last folder
+        if "/" in chosen or "\\" in chosen:
+            chosen = os.path.basename(chosen.rstrip("/\\")) or chosen
+    else:
+        chosen = title
+
+    # Final cleanup: remove stray punctuation and collapse spaces
+    chosen = "".join(ch for ch in chosen if ch.isalnum() or ch in " _-").strip()
+    chosen = "-".join(chosen.split())
+
+    return chosen
+
+
 def window_tracker():
-    print("[INFO] Window tracking started.")
+    if not CHECK_TRACK:
+        print("[INFO] Window tracking started.\n")
+    else:
+        wait_print_cyle = 5
+        print(f"[INFO] Printing titles and times for track check with min print intervall {wait_print_cyle}s.\n")
+
     last_title = None
     except_msg = None
     last_except = None
+    print_cyle = {}
 
     last_time = time.time()
 
@@ -99,7 +140,7 @@ def window_tracker():
         if TRACK_COMMAND:
             result = subprocess.run(TRACK_COMMAND, shell=True, capture_output=True, text=True)
             if result.returncode == 0:
-                current_title = result.stdout
+                current_title = result.stdout or "Desktop"
             else:
                 current_title = "Desktop"
                 except_msg = f"Window title command, results in errorcode {result.returncode} with message: {result.stdout} {result.stderr}"
@@ -125,6 +166,16 @@ def window_tracker():
         last_time = float(now)
         time.sleep(TRACK_INTERVAL)
 
+        if CHECK_TRACK:
+            if last_title.strip() and window_focus_times.get(last_title):
+                time_last = window_focus_times.get(last_title)
+                if print_cyle.get(last_title, 1) < time_last:
+                    print_cyle[last_title] = wait_print_cyle + print_cyle.get(last_title, 1)
+                    print("[INFO] Raw Title: " + last_title.strip())
+                    sanitize(last_title)
+                    print("[INFO] Active for secs: " + str(round(time_last, 2)))
+                    print()
+
     # Final update
     if last_title:
         window_focus_times[last_title] += time.time() - last_time
@@ -132,21 +183,7 @@ def window_tracker():
     print("[INFO] Window tracking stopped.")
 
 def sanitize(title: str) -> str:
-    if STRIP:
-        # Strip up to and including the last char in STRIP
-        pattern = f"[{re.escape(STRIP)}]"
-        match = re.search(pattern, title[::-1])  # search backwards
-        if match:
-            # Cut everything up to last STRIP char
-            last_pos = len(title) - match.start()
-            cleaned = title[last_pos:]
-    else:
-        cleaned = str(title)
-
-    # Replace unwanted characters with underscore
-    cleaned = re.sub(r"[^\w\s-]", "", cleaned)       # keep alphanum, _, space, -
-    cleaned = re.sub(r"[\s_-]+", "-", cleaned)     # collapse multiple separators
-    cleaned = re.sub(r"^[-_]+|[-_]+$", "", cleaned)  # clean - and _ from the ends
+    cleaned = extract_relevant_title(title)
 
     if cleaned:
         print(f"[INFO] Sanitized Window Title: {cleaned}")
@@ -193,7 +230,7 @@ def add_files(path):
     global latest_output_paths, last_output_paths
     if path and isinstance(path, str) and path not in latest_output_paths and path not in last_output_paths:
         latest_output_paths.append(path)
-        print(f"[OBS] Recording file path added: {path}")
+        print(f"[INFO] OBS Recording file path added: {path}")
 
 # === OBS EVENT HANDLERS ===
 
@@ -250,7 +287,7 @@ def on_record_state_changed(data):
 # === MAIN ===
 
 def main():
-    global OBS_HOST, OBS_PORT, OBS_PASSWORD, DESTINATION_BASE, TRACK_INTERVAL, TRACK_COMMAND, STRIP
+    global OBS_HOST, OBS_PORT, OBS_PASSWORD, DESTINATION_BASE, TRACK_INTERVAL, TRACK_COMMAND, CHECK_TRACK
     global PATH_TRANSLATE, SHORT_HANDS
 
     config_defaults = load_config()
@@ -287,11 +324,24 @@ def main():
     OBS_HOST = args.host
     OBS_PORT = args.port
     OBS_PASSWORD = args.password
-    STRIP = args.strip
     DESTINATION_BASE = args.dest_base
     TRACK_INTERVAL = args.track_interval
     TRACK_COMMAND = args.track_command
+    CHECK_TRACK = args.check_track
 
+    if CHECK_TRACK:
+        stop_focus_thread = False
+        print("\n[INFO] Running in Tracking Only Mode.")
+        print("[INFO] Close with Ctrl+c\n")
+        try:
+            window_tracker()
+        except KeyboardInterrupt:
+            print(f"\n[Info] Stopping Tracking")
+        except Exception as e:
+            print(f"\n[Warn] Window Tracking error: {e}")
+        finally:
+            print("\n[INFO] Exiting (Tracking Only Mode).")
+        return
 
     print("[INFO] Connecting to OBS WebSocket...")
     try:
@@ -313,14 +363,15 @@ def main():
         print("[INFO] Listening to events...")
         while True:
             time.sleep(1)
+
     except KeyboardInterrupt:
         print("\n[INFO] Exiting.")
     except NameError:
         print("\n[INFO] Exiting.")
     finally:
-        global stop_focus_thread
         stop_focus_thread = True
         cl_evt.disconnect()
+
 
 if __name__ == "__main__":
     main()
