@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import re
 import os
 import time
 import json
@@ -8,6 +7,8 @@ import shutil
 import argparse
 import threading
 import subprocess
+import contextlib
+import io
 from collections import defaultdict
 import platform
 import obsws_python as obs
@@ -18,26 +19,31 @@ import pywinctl
 # -S '{"OBS-move-rec-python3-Konsole": "OBSmovRec-Konsole"}'
 # =============================
 
+
 def get_config_dir(app_name):
     config_dir = None
 
-    if platform.system() == 'Windows':
+    if platform.system() == "Windows":
         # Windows
-        appdata = os.getenv('APPDATA')
+        appdata = os.getenv("APPDATA")
         if appdata:
             config_dir = os.path.join(appdata, app_name)
-    elif platform.system() == 'Darwin':  # macOS
-        config_dir = os.path.join(os.path.expanduser("~"), "Library", "Application Support", app_name)
+    elif platform.system() == "Darwin":  # macOS
+        config_dir = os.path.join(
+            os.path.expanduser("~"), "Library", "Application Support", app_name
+        )
 
-    if not config_dir: # Linux and others
+    if not config_dir:  # Linux and others
         config_dir = os.path.join(os.path.expanduser("~"), ".config", app_name)
 
     return config_dir
+
 
 # App-specific config details
 APP_NAME = "OBS-recording-mover"
 CONFIG_DIR = get_config_dir(APP_NAME)
 CONFIG_PATH = os.path.join(CONFIG_DIR, "mover_config.json")
+
 
 # Load config if it exists
 def load_config():
@@ -49,25 +55,76 @@ def load_config():
             pass
     return {}
 
+
 # Save config to disk
 def save_config(config):
     os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4)
 
+
 # Setup argument parser with config as default
 def setup_arg_parser(config_defaults):
     parser = argparse.ArgumentParser(description="OBS Recording Mover")
 
-    parser.add_argument("-H", "--host", default=config_defaults.get("host", "localhost"), help="OBS WebSocket IP (default localhost)")
-    parser.add_argument("-P", "--port", type=int, default=config_defaults.get("port", 4455), help="OBS WebSocket PORT (default 4455)")
-    parser.add_argument("-p", "--password", default=config_defaults.get("password", ""), help="OBS WebSocket password")
-    parser.add_argument("-d", "--dest_base", default=config_defaults.get("dest_base", ".."), help="Where to relocate the Videos from (default \"..\")")
-    parser.add_argument("-t", "--track_interval", type=int, default=config_defaults.get("track_interval", 1), help="Window tracking intervall (default 1)")
-    parser.add_argument("-c", "--track_command", default=config_defaults.get("track_command", ""), help="Set a window tracking command, so wayland users can still use window tracking")
-    parser.add_argument("-T", "--translate", type=str, default=config_defaults.get("translate", {}), help="Path translation JSON string")
-    parser.add_argument("-S", "--shorthand", type=str, default=config_defaults.get("shorthand", {}), help="Shorthand mapping JSON string")
-    parser.add_argument("-C", "--check_track", action='store_true', help="Only Check what window would be tracked and the sanitized title")
+    parser.add_argument(
+        "-H",
+        "--host",
+        default=config_defaults.get("host", "localhost"),
+        help="OBS WebSocket IP (default localhost)",
+    )
+    parser.add_argument(
+        "-P",
+        "--port",
+        type=int,
+        default=config_defaults.get("port", 4455),
+        help="OBS WebSocket PORT (default 4455)",
+    )
+    parser.add_argument(
+        "-p",
+        "--password",
+        default=config_defaults.get("password", ""),
+        help="OBS WebSocket password",
+    )
+    parser.add_argument(
+        "-d",
+        "--dest_base",
+        default=config_defaults.get("dest_base", ".."),
+        help='Where to relocate the Videos from (default "..")',
+    )
+    parser.add_argument(
+        "-t",
+        "--track_interval",
+        type=int,
+        default=config_defaults.get("track_interval", 1),
+        help="Window tracking intervall (default 1)",
+    )
+    parser.add_argument(
+        "-c",
+        "--track_command",
+        default=config_defaults.get("track_command", ""),
+        help="Set a window tracking command, so wayland users can still use window tracking",
+    )
+    parser.add_argument(
+        "-T",
+        "--translate",
+        type=str,
+        default=config_defaults.get("translate", {}),
+        help="Path translation JSON string",
+    )
+    parser.add_argument(
+        "-S",
+        "--shorthand",
+        type=str,
+        default=config_defaults.get("shorthand", {}),
+        help="Shorthand mapping JSON string",
+    )
+    parser.add_argument(
+        "-C",
+        "--check_track",
+        action="store_true",
+        help="Only Check what window would be tracked and the sanitized title",
+    )
 
     args = parser.parse_args()
     return args
@@ -83,9 +140,11 @@ last_output_active = None
 latest_output_paths = []
 last_output_paths = []
 
+
 def get_focused_window_title():
     win = pywinctl.getActiveWindow()
     return win.title if win else "Desktop"
+
 
 def extract_relevant_title(title: str) -> str:
     # Normalize separators
@@ -97,12 +156,20 @@ def extract_relevant_title(title: str) -> str:
     # If nothing to process, return as-is
     if parts:
         # Words to ignore
-        irrelevant_keywords = ["vulkan", "direct3d", "opengl", "metal", "dx12", "dx11", "dx9"]
+        irrelevant_keywords = [
+            "vulkan",
+            "direct3d",
+            "opengl",
+            "metal",
+            "dx12",
+            "dx11",
+            "dx9",
+        ]
 
         # Pop last entriey if irrelevant (case-insensitive)
-        last = parts[-1].lower().replace(" ","")
+        last = parts[-1].lower().replace(" ", "")
         for kw in irrelevant_keywords:
-            if kw in last and len(last) < len(kw)+6:
+            if kw in last and len(last) < len(kw) + 6:
                 parts.pop()
 
     if parts:
@@ -127,7 +194,9 @@ def window_tracker():
         print("[INFO] Window tracking started.\n")
     else:
         wait_print_cyle = 5
-        print(f"[INFO] Printing titles and times for track check with min print intervall {wait_print_cyle}s.\n")
+        print(
+            f"[INFO] Printing titles and times for track check with min print intervall {wait_print_cyle}s.\n"
+        )
 
     last_title = None
     except_msg = None
@@ -138,7 +207,9 @@ def window_tracker():
 
     while not stop_focus_thread:
         if TRACK_COMMAND:
-            result = subprocess.run(TRACK_COMMAND, shell=True, capture_output=True, text=True)
+            result = subprocess.run(
+                TRACK_COMMAND, shell=True, capture_output=True, text=True
+            )
             if result.returncode == 0:
                 current_title = result.stdout or "Desktop"
             else:
@@ -170,7 +241,9 @@ def window_tracker():
             if last_title.strip() and window_focus_times.get(last_title):
                 time_last = window_focus_times.get(last_title)
                 if print_cyle.get(last_title, 1) < time_last:
-                    print_cyle[last_title] = wait_print_cyle + print_cyle.get(last_title, 1)
+                    print_cyle[last_title] = wait_print_cyle + print_cyle.get(
+                        last_title, 1
+                    )
                     print("[INFO] Raw Title: " + last_title.strip())
                     sanitize(last_title)
                     print("[INFO] Active for secs: " + str(round(time_last, 2)))
@@ -182,6 +255,7 @@ def window_tracker():
 
     print("[INFO] Window tracking stopped.")
 
+
 def sanitize(title: str) -> str:
     cleaned = extract_relevant_title(title)
 
@@ -191,6 +265,7 @@ def sanitize(title: str) -> str:
         cleaned = SHORT_HANDS.get(cleaned)
         print(f"[INFO] Found Short Hand Title: {cleaned}")
     return cleaned
+
 
 def path_translate(path: str) -> str:
     norm_path = os.path.normpath(path)
@@ -205,6 +280,7 @@ def path_translate(path: str) -> str:
 
     return path
 
+
 def move_recording(path, window_title):
     path = path_translate(path)
 
@@ -213,7 +289,9 @@ def move_recording(path, window_title):
         return
 
     sanitized_title = sanitize(window_title)
-    target_dir = os.path.abspath(os.path.join(os.path.dirname(path), DESTINATION_BASE, sanitized_title))
+    target_dir = os.path.abspath(
+        os.path.join(os.path.dirname(path), DESTINATION_BASE, sanitized_title)
+    )
     os.makedirs(target_dir, exist_ok=True)
 
     filename = os.path.basename(path)
@@ -228,17 +306,25 @@ def move_recording(path, window_title):
 
 def add_files(path):
     global latest_output_paths, last_output_paths
-    if path and isinstance(path, str) and path not in latest_output_paths and path not in last_output_paths:
+    if (
+        path
+        and isinstance(path, str)
+        and path not in latest_output_paths
+        and path not in last_output_paths
+    ):
         latest_output_paths.append(path)
         print(f"[INFO] OBS Recording file path added: {path}")
 
+
 # === OBS EVENT HANDLERS ===
+
 
 def on_record_file_changed(data):
     try:
         add_files(data.new_output_path)
     except Exception as e:
         add_files(data.output_path)
+
 
 def on_record_state_changed(data):
     global recording_active, focus_thread, stop_focus_thread
@@ -249,7 +335,10 @@ def on_record_state_changed(data):
     add_files(data.output_path)
 
     p = data.output_state
-    if output_active == last_output_active or p in ["OBS_WEBSOCKET_OUTPUT_RESUMED", "OBS_WEBSOCKET_OUTPUT_PAUSED"]:
+    if output_active == last_output_active or p in [
+        "OBS_WEBSOCKET_OUTPUT_RESUMED",
+        "OBS_WEBSOCKET_OUTPUT_PAUSED",
+    ]:
         return  # Avoid triggering on pause/resume
 
     last_output_active = output_active
@@ -284,10 +373,13 @@ def on_record_state_changed(data):
         else:
             print("[WARN] No output path recorded from OBS.")
 
+
 # === MAIN ===
 
+
 def main():
-    global OBS_HOST, OBS_PORT, OBS_PASSWORD, DESTINATION_BASE, TRACK_INTERVAL, TRACK_COMMAND, CHECK_TRACK
+    global OBS_HOST, OBS_PORT, OBS_PASSWORD, DESTINATION_BASE
+    global TRACK_INTERVAL, TRACK_COMMAND, CHECK_TRACK
     global PATH_TRANSLATE, SHORT_HANDS
 
     config_defaults = load_config()
@@ -318,8 +410,11 @@ def main():
         args.shorthand = {}
 
     SHORT_HANDS = args.shorthand
-
-    save_config(vars(args))
+    #  config_defaults["successful_sockets"][host_string] = int(time.time())
+    save_config(
+        vars(args)
+        | {"successful_sockets": config_defaults.setdefault("successful_sockets", {})}
+    )
 
     OBS_HOST = args.host
     OBS_PORT = args.port
@@ -336,7 +431,7 @@ def main():
         try:
             window_tracker()
         except KeyboardInterrupt:
-            print(f"\n[Info] Stopping Tracking")
+            print("\n[Info] Stopping Tracking")
         except Exception as e:
             print(f"\n[Warn] Window Tracking error: {e}")
         finally:
@@ -344,33 +439,60 @@ def main():
         return
 
     print("[INFO] Connecting to OBS WebSocket...")
+
+    successful_sockets = config_defaults.setdefault("successful_sockets", {})
+    host_string = f"{OBS_HOST}:{OBS_PORT}"
+    last_success = successful_sockets.setdefault(host_string, None)
+    cl_evt = None
+    wait_message_printed = False
+
+    while True:
+        try:
+            # suppress any traceback printed to stderr
+            with contextlib.redirect_stderr(io.StringIO()):
+                cl_evt = obs.EventClient(
+                    host=OBS_HOST, port=OBS_PORT, password=OBS_PASSWORD
+                )
+
+            cl_evt.callback.register(on_record_file_changed)
+            cl_evt.callback.register(on_record_state_changed)
+
+            print("[INFO] Connected to OBS.")
+
+            # Save successful connection info
+            config_defaults["successful_sockets"][host_string] = int(time.time())
+            save_config(config_defaults)
+            break
+
+        except Exception:
+            if last_success:
+                if not wait_message_printed:
+                    print(
+                        "[INFO] OBS not running, waiting for OBS to become available..."
+                    )
+                    wait_message_printed = True
+                time.sleep(2)
+                continue
+            else:
+                print("[ERROR] Failed to connect to OBS WebSocket.")
+                cl_evt = None
+                break
+
+    # Now listen normally
     try:
-        cl_evt = obs.EventClient(host=OBS_HOST, port=OBS_PORT, password=OBS_PASSWORD)
-    except Exception as e:
-        print("[ERROR] Failed to connect to WebSocket")
-        print(f"[ERROR] Error report: {e}")
-        cl_evt = None
-
-    if cl_evt:
-        # Register callback functions (no event name needed — auto-mapped from function names)
-        cl_evt.callback.register(on_record_file_changed)
-        cl_evt.callback.register(on_record_state_changed)
-
-    try:
-        if not cl_evt:
-            raise NameError("WebSocket Object missing")
-
         print("[INFO] Listening to events...")
         while True:
             time.sleep(1)
 
     except KeyboardInterrupt:
         print("\n[INFO] Exiting.")
-    except NameError:
-        print("\n[INFO] Exiting.")
     finally:
         stop_focus_thread = True
-        cl_evt.disconnect()
+        if cl_evt:
+            try:
+                cl_evt.disconnect()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
